@@ -1,35 +1,33 @@
 import React, { useCallback, useEffect, useMemo } from "react";
-import { Button, Flex } from "design-system";
+import { Button, Flex } from "@appsmith/ads";
 import WidgetEntity from "pages/Editor/Explorer/Widgets/WidgetEntity";
 import { useSelector } from "react-redux";
 
+import { selectWidgetsForCurrentPage } from "ee/selectors/entitiesSelector";
 import {
-  getCurrentPageId,
-  selectWidgetsForCurrentPage,
-} from "@appsmith/selectors/entitiesSelector";
-import { getPagePermissions } from "selectors/editorSelectors";
+  getCurrentBasePageId,
+  getPagePermissions,
+} from "selectors/editorSelectors";
 import { useFeatureFlag } from "utils/hooks/useFeatureFlag";
-import { FEATURE_FLAG } from "@appsmith/entities/FeatureFlag";
-import { getHasManagePagePermission } from "@appsmith/utils/BusinessFeatures/permissionPageHelpers";
-import { createMessage, EDITOR_PANE_TEXTS } from "@appsmith/constants/messages";
-import { EmptyState } from "../components/EmptyState";
+import { FEATURE_FLAG } from "ee/entities/FeatureFlag";
+import { getHasManagePagePermission } from "ee/utils/BusinessFeatures/permissionPageHelpers";
+import { createMessage, EDITOR_PANE_TEXTS } from "ee/constants/messages";
+import { EmptyState } from "@appsmith/ads";
 import history from "utils/history";
-import { builderURL } from "@appsmith/RouteBuilder";
+import { builderURL } from "ee/RouteBuilder";
 import styled from "styled-components";
 
 const ListContainer = styled(Flex)`
   & .t--entity-item {
     height: 32px;
-    & .t--entity-name {
-      padding-left: var(--ads-v2-spaces-3);
-    }
   }
 `;
 
 const ListWidgets = (props: {
   setFocusSearchInput: (focusSearchInput: boolean) => void;
 }) => {
-  const pageId = useSelector(getCurrentPageId) as string;
+  const { setFocusSearchInput } = props;
+  const basePageId = useSelector(getCurrentBasePageId) as string;
   const widgets = useSelector(selectWidgetsForCurrentPage);
   const pagePermissions = useSelector(getPagePermissions);
   const isFeatureEnabled = useFeatureFlag(FEATURE_FLAG.license_gac_enabled);
@@ -44,16 +42,29 @@ const ListWidgets = (props: {
   }, [widgets?.children]);
 
   const addButtonClickHandler = useCallback(() => {
-    props.setFocusSearchInput(true);
+    setFocusSearchInput(true);
     history.push(builderURL({}));
-  }, []);
+  }, [setFocusSearchInput]);
 
   const widgetsExist =
     widgets && widgets.children && widgets.children.length > 0;
 
-  useEffect(() => {
-    props.setFocusSearchInput(false);
-  }, []);
+  useEffect(
+    function resetFocusOnSearch() {
+      setFocusSearchInput(false);
+    },
+    [setFocusSearchInput],
+  );
+
+  const blankStateButtonProps = useMemo(
+    () => ({
+      className: "t--add-item",
+      testId: "t--add-item",
+      text: createMessage(EDITOR_PANE_TEXTS.widget_add_button),
+      onClick: canManagePages ? addButtonClickHandler : undefined,
+    }),
+    [addButtonClickHandler, canManagePages],
+  );
 
   return (
     <ListContainer
@@ -65,19 +76,18 @@ const ListWidgets = (props: {
       {!widgetsExist ? (
         /* If no widgets exist, show the blank state */
         <EmptyState
-          buttonClassName="t--add-item"
-          buttonText={createMessage(EDITOR_PANE_TEXTS.widget_add_button)}
+          button={blankStateButtonProps}
           description={createMessage(
             EDITOR_PANE_TEXTS.widget_blank_state_description,
           )}
           icon={"widgets-v3"}
-          onClick={canManagePages ? addButtonClickHandler : undefined}
         />
       ) : canManagePages ? (
         /* We show the List Add button when side by side is not enabled  */
         <Flex flexDirection="column" px="spaces-3">
           <Button
             className="t--add-item"
+            data-testid="t--add-item"
             kind={"secondary"}
             onClick={addButtonClickHandler}
             size={"sm"}
@@ -97,9 +107,9 @@ const ListWidgets = (props: {
         >
           {widgets?.children?.map((child) => (
             <WidgetEntity
+              basePageId={basePageId}
               childWidgets={child.children}
               key={child.widgetId}
-              pageId={pageId}
               searchKeyword=""
               step={1}
               widgetId={child.widgetId}
