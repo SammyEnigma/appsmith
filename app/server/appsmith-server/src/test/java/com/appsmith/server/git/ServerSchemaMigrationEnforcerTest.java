@@ -1,27 +1,33 @@
 package com.appsmith.server.git;
 
 import com.appsmith.external.converters.ISOStringToInstantConverter;
+import com.appsmith.external.dtos.GitLogDTO;
 import com.appsmith.external.dtos.ModifiedResources;
-import com.appsmith.external.enums.FeatureFlagEnum;
 import com.appsmith.external.git.GitExecutor;
 import com.appsmith.external.models.ApplicationGitReference;
+import com.appsmith.server.configurations.ProjectProperties;
 import com.appsmith.server.constants.SerialiseArtifactObjective;
 import com.appsmith.server.domains.Workspace;
 import com.appsmith.server.dtos.ApplicationImportDTO;
 import com.appsmith.server.dtos.ApplicationJson;
+import com.appsmith.server.events.AutoCommitEvent;
 import com.appsmith.server.exports.internal.ExportService;
-import com.appsmith.server.featureflags.CachedFeatures;
+import com.appsmith.server.git.autocommit.AutoCommitEventHandler;
+import com.appsmith.server.git.autocommit.AutoCommitEventHandlerImpl;
 import com.appsmith.server.helpers.CommonGitFileUtils;
+import com.appsmith.server.helpers.DSLMigrationUtils;
 import com.appsmith.server.helpers.MockPluginExecutor;
 import com.appsmith.server.helpers.PluginExecutorHelper;
+import com.appsmith.server.helpers.RedisUtils;
 import com.appsmith.server.imports.internal.ImportService;
-import com.appsmith.server.services.FeatureFlagService;
+import com.appsmith.server.services.AnalyticsService;
 import com.appsmith.server.services.WorkspaceService;
 import com.appsmith.server.testhelpers.git.GitFileSystemTestHelper;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -29,38 +35,33 @@ import org.eclipse.jgit.diff.DiffEntry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mockito;
-import org.mockito.stubbing.Answer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.data.mongo.AutoConfigureDataMongo;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.mock.mockito.SpyBean;
-import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.core.io.buffer.DataBufferUtils;
-import org.springframework.core.io.buffer.DefaultDataBufferFactory;
-import org.springframework.http.MediaType;
-import org.springframework.http.codec.multipart.FilePart;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.security.test.context.support.WithUserDetails;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.junit.jupiter.SpringExtension;
-import reactor.core.publisher.Flux;
+import org.springframework.util.StreamUtils;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
-import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static com.appsmith.server.constants.ArtifactType.APPLICATION;
-import static java.lang.Boolean.FALSE;
+import static com.appsmith.server.git.autocommit.AutoCommitEventHandlerCEImpl.AUTO_COMMIT_MSG_FORMAT;
 import static java.lang.Boolean.TRUE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -93,7 +94,6 @@ import static org.mockito.ArgumentMatchers.any;
  *      In order to retrieve the updated JSON, one could simply copy the serialized files from the test case itself.
  */
 @Slf4j
-@ExtendWith(SpringExtension.class)
 @AutoConfigureDataMongo
 @SpringBootTest
 @DirtiesContext
@@ -117,11 +117,28 @@ public class ServerSchemaMigrationEnforcerTest {
     @SpyBean
     GitExecutor gitExecutor;
 
-    @SpyBean
-    FeatureFlagService featureFlagService;
-
     @MockBean
     PluginExecutorHelper pluginExecutorHelper;
+
+    AutoCommitEventHandler autoCommitEventHandler;
+
+    @Autowired
+    ProjectProperties projectProperties;
+
+    @SpyBean
+    RedisUtils redisUtils;
+
+    @SpyBean
+    GitRedisUtils gitRedisUtils;
+
+    @Autowired
+    AnalyticsService analyticsService;
+
+    @MockBean
+    DSLMigrationUtils dslMigrationUtils;
+
+    @MockBean
+    ApplicationEventPublisher applicationEventPublisher;
 
     private final Gson gson = new GsonBuilder()
             .registerTypeAdapter(Instant.class, new ISOStringToInstantConverter())
@@ -208,13 +225,13 @@ public class ServerSchemaMigrationEnforcerTest {
     @WithUserDetails(value = "api_user")
     public void importApplication_ThenExportApplication_MatchJson_equals_Success() throws URISyntaxException {
         String filePath = "ce-automation-test.json";
-        FilePart filePart = createFilePart(filePath);
+        String jsonContents = readResource(filePath);
         Workspace newWorkspace = new Workspace();
         newWorkspace.setName("Template Workspace");
         Mono<Workspace> workspaceMono = workspaceService.create(newWorkspace).cache();
 
         ApplicationJson applicationJsonToBeImported = importService
-                .extractArtifactExchangeJson(filePart)
+                .extractArtifactExchangeJson(jsonContents)
                 .map(artifactExchangeJson -> (ApplicationJson) artifactExchangeJson)
                 .block();
 
@@ -229,7 +246,7 @@ public class ServerSchemaMigrationEnforcerTest {
 
         final Mono<ApplicationImportDTO> resultMono = workspaceMono
                 .flatMap(workspace ->
-                        importService.extractArtifactExchangeJsonAndSaveArtifact(filePart, workspace.getId(), null))
+                        importService.extractArtifactExchangeJsonAndSaveArtifact(jsonContents, workspace.getId(), null))
                 .map(importableArtifactDTO -> (ApplicationImportDTO) importableArtifactDTO);
 
         final Mono<ApplicationJson> exportApplicationMono = resultMono.flatMap(applicationImportDTO -> {
@@ -260,17 +277,10 @@ public class ServerSchemaMigrationEnforcerTest {
                 .verifyComplete();
     }
 
-    private FilePart createFilePart(String filePath) throws URISyntaxException {
-        FilePart filePart = Mockito.mock(FilePart.class, Mockito.RETURNS_DEEP_STUBS);
-        URL resource = this.getClass().getResource(filePath);
-        Flux<DataBuffer> dataBufferFlux = DataBufferUtils.read(
-                        Path.of(resource.toURI()), new DefaultDataBufferFactory(), 4096)
-                .cache();
-
-        Mockito.when(filePart.content()).thenReturn(dataBufferFlux);
-        Mockito.when(filePart.headers().getContentType()).thenReturn(MediaType.APPLICATION_JSON);
-
-        return filePart;
+    @SneakyThrows
+    private String readResource(String filePath) {
+        return StreamUtils.copyToString(
+                new DefaultResourceLoader().getResource(filePath).getInputStream(), StandardCharsets.UTF_8);
     }
 
     private void removeCustomJsLibsEntries(JsonObject applicationObjectNode) {
@@ -290,51 +300,6 @@ public class ServerSchemaMigrationEnforcerTest {
             if (exportedApplicationNode.has(UNPUBLISHED_CUSTOM_JS_LIBS)) {
                 exportedApplicationNode.remove(UNPUBLISHED_CUSTOM_JS_LIBS);
             }
-        }
-    }
-
-    @Test
-    public void savedFile_reSavedWithDifferentSerialisationLogic_diffOccurs()
-            throws URISyntaxException, IOException, GitAPIException {
-
-        ApplicationJson applicationJson =
-                gitFileSystemTestHelper.getApplicationJson(this.getClass().getResource("ce-automation-test.json"));
-
-        ModifiedResources modifiedResources = new ModifiedResources();
-        modifiedResources.setAllModified(true);
-        applicationJson.setModifiedResources(modifiedResources);
-
-        CachedFeatures cachedFeatures = new CachedFeatures();
-        cachedFeatures.setFeatures(Map.of(FeatureFlagEnum.release_git_autocommit_feature_enabled.name(), FALSE));
-        Mockito.when(featureFlagService.getCachedTenantFeatureFlags())
-                .thenAnswer((Answer<CachedFeatures>) invocations -> cachedFeatures);
-
-        gitFileSystemTestHelper.setupGitRepository(
-                WORKSPACE_ID, DEFAULT_APPLICATION_ID, BRANCH_NAME, REPO_NAME, applicationJson);
-
-        cachedFeatures.setFeatures(Map.of(FeatureFlagEnum.release_git_autocommit_feature_enabled.name(), TRUE));
-        Path suffixPath = Paths.get(WORKSPACE_ID, DEFAULT_APPLICATION_ID, REPO_NAME);
-        Path gitCompletePath = gitExecutor.createRepoPath(suffixPath);
-
-        commonGitFileUtils
-                .saveArtifactToLocalRepo(suffixPath, applicationJson, BRANCH_NAME)
-                .block();
-
-        try (Git gitRepo = Git.open(gitCompletePath.toFile())) {
-            List<DiffEntry> diffEntries = gitRepo.diff().call();
-            Set<String> fileChanges = Set.of(
-                    "application.json",
-                    "metadata.json",
-                    "theme.json",
-                    "datasources/JSON typicode API (1).json",
-                    "datasources/TED postgres (1).json",
-                    "datasources/mainGoogleSheetDS.json");
-            for (DiffEntry diff : diffEntries) {
-                assertThat(fileChanges).contains(diff.getOldPath());
-                assertThat(fileChanges).contains(diff.getNewPath());
-                assertThat(diff.getChangeType()).isEqualTo(DiffEntry.ChangeType.MODIFY);
-            }
-            assertThat(diffEntries.size()).isNotZero();
         }
     }
 
@@ -374,11 +339,6 @@ public class ServerSchemaMigrationEnforcerTest {
         ModifiedResources modifiedResources = new ModifiedResources();
         modifiedResources.setAllModified(true);
         applicationJson.setModifiedResources(modifiedResources);
-
-        CachedFeatures cachedFeatures = new CachedFeatures();
-        cachedFeatures.setFeatures(Map.of(FeatureFlagEnum.release_git_autocommit_feature_enabled.name(), TRUE));
-        Mockito.when(featureFlagService.getCachedTenantFeatureFlags())
-                .thenAnswer((Answer<CachedFeatures>) invocations -> cachedFeatures);
 
         gitFileSystemTestHelper.setupGitRepository(
                 WORKSPACE_ID, DEFAULT_APPLICATION_ID, BRANCH_NAME, REPO_NAME, applicationJson);
@@ -425,5 +385,74 @@ public class ServerSchemaMigrationEnforcerTest {
                 assertThat(diffEntry.getOldPath()).isEqualTo(diffEntry.getNewPath());
             }
         }
+    }
+
+    @Test
+    public void autocommitMigration_WhenServerVersionIsBehindDiffOccursAnd_CommitSuccess()
+            throws URISyntaxException, IOException, GitAPIException {
+
+        autoCommitEventHandler = new AutoCommitEventHandlerImpl(
+                applicationEventPublisher,
+                gitRedisUtils,
+                redisUtils,
+                dslMigrationUtils,
+                commonGitFileUtils,
+                gitExecutor,
+                projectProperties,
+                analyticsService);
+
+        AutoCommitEvent autoCommitEvent = createEvent();
+        autoCommitEvent.setIsServerSideEvent(TRUE);
+        ApplicationJson applicationJson =
+                gitFileSystemTestHelper.getApplicationJson(this.getClass().getResource("application.json"));
+
+        Path baseRepoSuffix = Paths.get(
+                autoCommitEvent.getWorkspaceId(), autoCommitEvent.getApplicationId(), autoCommitEvent.getRepoName());
+
+        Mockito.doReturn(Mono.just("success"))
+                .when(gitExecutor)
+                .pushApplication(
+                        baseRepoSuffix,
+                        autoCommitEvent.getRepoUrl(),
+                        autoCommitEvent.getPublicKey(),
+                        autoCommitEvent.getPrivateKey(),
+                        autoCommitEvent.getBranchName());
+
+        gitFileSystemTestHelper.setupGitRepository(autoCommitEvent, applicationJson);
+
+        StepVerifier.create(autoCommitEventHandler
+                        .autoCommitServerMigration(autoCommitEvent)
+                        .zipWhen(a -> redisUtils.getAutoCommitProgress(autoCommitEvent.getApplicationId())))
+                .assertNext(tuple2 -> {
+                    assertThat(tuple2.getT1()).isTrue();
+                    assertThat(tuple2.getT2()).isEqualTo(100);
+                })
+                .verifyComplete();
+
+        StepVerifier.create(gitExecutor.getCommitHistory(baseRepoSuffix))
+                .assertNext(gitLogDTOs -> {
+                    assertThat(gitLogDTOs).isNotEmpty();
+                    assertThat(gitLogDTOs.size()).isEqualTo(3);
+                    Set<String> commitMessages =
+                            gitLogDTOs.stream().map(GitLogDTO::getCommitMessage).collect(Collectors.toSet());
+                    assertThat(commitMessages)
+                            .contains(String.format(AUTO_COMMIT_MSG_FORMAT, projectProperties.getVersion()));
+                })
+                .verifyComplete();
+    }
+
+    private AutoCommitEvent createEvent() {
+        String defaultApplicationId = "default-app-id", branchName = "develop", workspaceId = "test-workspace-id";
+        AutoCommitEvent autoCommitEvent = new AutoCommitEvent();
+        autoCommitEvent.setApplicationId(defaultApplicationId + UUID.randomUUID());
+        autoCommitEvent.setBranchName(branchName);
+        autoCommitEvent.setRepoName("test-repo");
+        autoCommitEvent.setAuthorName("test author");
+        autoCommitEvent.setAuthorEmail("testauthor@example.com");
+        autoCommitEvent.setWorkspaceId(workspaceId);
+        autoCommitEvent.setRepoUrl("git@example.com:exampleorg/example-repo.git");
+        autoCommitEvent.setPrivateKey("private-key");
+        autoCommitEvent.setPublicKey("public-key");
+        return autoCommitEvent;
     }
 }

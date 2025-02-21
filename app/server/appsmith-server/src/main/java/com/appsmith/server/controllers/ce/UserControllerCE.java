@@ -9,7 +9,6 @@ import com.appsmith.server.dtos.ResendEmailVerificationDTO;
 import com.appsmith.server.dtos.ResetUserPasswordDTO;
 import com.appsmith.server.dtos.ResponseDTO;
 import com.appsmith.server.dtos.UserProfileDTO;
-import com.appsmith.server.dtos.UserSignupRequestDTO;
 import com.appsmith.server.dtos.UserUpdateDTO;
 import com.appsmith.server.services.SessionUserService;
 import com.appsmith.server.services.UserDataService;
@@ -18,7 +17,6 @@ import com.appsmith.server.services.UserWorkspaceService;
 import com.appsmith.server.solutions.UserAndAccessManagementService;
 import com.appsmith.server.solutions.UserSignup;
 import com.fasterxml.jackson.annotation.JsonView;
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -55,32 +53,10 @@ public class UserControllerCE {
     private final UserAndAccessManagementService userAndAccessManagementService;
 
     @JsonView(Views.Public.class)
-    @PostMapping(consumes = {MediaType.APPLICATION_JSON_VALUE})
-    @ResponseStatus(HttpStatus.CREATED)
-    public Mono<ResponseDTO<User>> create(@Valid @RequestBody User resource, ServerWebExchange exchange) {
-        return userSignup
-                .signupAndLogin(resource, exchange)
-                .map(created -> new ResponseDTO<>(HttpStatus.CREATED.value(), created, null));
-    }
-
-    @JsonView(Views.Public.class)
     @PostMapping(consumes = {MediaType.APPLICATION_FORM_URLENCODED_VALUE})
     @ResponseStatus(HttpStatus.CREATED)
     public Mono<Void> createFormEncoded(ServerWebExchange exchange) {
         return userSignup.signupAndLoginFromFormData(exchange);
-    }
-
-    @JsonView(Views.Public.class)
-    @PostMapping(
-            value = "/super",
-            consumes = {MediaType.APPLICATION_JSON_VALUE})
-    public Mono<ResponseDTO<User>> createSuperUser(
-            @Valid @RequestBody UserSignupRequestDTO resource,
-            @RequestHeader("Origin") String originHeader,
-            ServerWebExchange exchange) {
-        return userSignup
-                .signupAndLoginSuper(resource, originHeader, exchange)
-                .map(created -> new ResponseDTO<>(HttpStatus.CREATED.value(), created, null));
     }
 
     @JsonView(Views.Public.class)
@@ -96,15 +72,13 @@ public class UserControllerCE {
     @PutMapping()
     public Mono<ResponseDTO<User>> update(@RequestBody UserUpdateDTO updates, ServerWebExchange exchange) {
         return service.updateCurrentUser(updates, exchange)
-                .map(updatedUser -> new ResponseDTO<>(HttpStatus.OK.value(), updatedUser, null));
+                .map(updatedUser -> new ResponseDTO<>(HttpStatus.OK, updatedUser));
     }
 
     @JsonView(Views.Public.class)
     @PutMapping("/leaveWorkspace/{workspaceId}")
     public Mono<ResponseDTO<User>> leaveWorkspace(@PathVariable String workspaceId) {
-        return userWorkspaceService
-                .leaveWorkspace(workspaceId)
-                .map(user -> new ResponseDTO<>(HttpStatus.OK.value(), user, null));
+        return userWorkspaceService.leaveWorkspace(workspaceId).map(user -> new ResponseDTO<>(HttpStatus.OK, user));
     }
 
     /**
@@ -122,14 +96,13 @@ public class UserControllerCE {
         return service.forgotPasswordTokenGenerate(userPasswordDTO)
                 .defaultIfEmpty(true)
                 .onErrorReturn(true)
-                .thenReturn(new ResponseDTO<>(HttpStatus.OK.value(), true, null));
+                .thenReturn(new ResponseDTO<>(HttpStatus.OK, true));
     }
 
     @JsonView(Views.Public.class)
     @GetMapping("/verifyPasswordResetToken")
     public Mono<ResponseDTO<Boolean>> verifyPasswordResetToken(@RequestParam String token) {
-        return service.verifyPasswordResetToken(token)
-                .map(result -> new ResponseDTO<>(HttpStatus.OK.value(), result, null));
+        return service.verifyPasswordResetToken(token).map(result -> new ResponseDTO<>(HttpStatus.OK, result));
     }
 
     @JsonView(Views.Public.class)
@@ -137,14 +110,13 @@ public class UserControllerCE {
     public Mono<ResponseDTO<Boolean>> resetPasswordAfterForgotPassword(
             @RequestBody ResetUserPasswordDTO userPasswordDTO) {
         return service.resetPasswordAfterForgotPassword(userPasswordDTO.getToken(), userPasswordDTO)
-                .map(result -> new ResponseDTO<>(HttpStatus.OK.value(), result, null));
+                .map(result -> new ResponseDTO<>(HttpStatus.OK, result));
     }
 
     @JsonView(Views.Public.class)
     @GetMapping("/me")
     public Mono<ResponseDTO<UserProfileDTO>> getUserProfile(@AuthenticationPrincipal User user) {
-        return service.buildUserProfileDTO(user)
-                .map(profile -> new ResponseDTO<>(HttpStatus.OK.value(), profile, null));
+        return service.buildUserProfileDTO(user).map(profile -> new ResponseDTO<>(HttpStatus.OK, profile));
     }
 
     /**
@@ -163,7 +135,7 @@ public class UserControllerCE {
             @RequestParam(required = false) String recaptchaToken) {
         return userAndAccessManagementService
                 .inviteUsers(inviteUsersDTO, originHeader, recaptchaToken)
-                .map(users -> new ResponseDTO<>(HttpStatus.OK.value(), users, null));
+                .map(users -> new ResponseDTO<>(HttpStatus.OK, users));
     }
 
     @JsonView(Views.Public.class)
@@ -172,20 +144,19 @@ public class UserControllerCE {
         return sessionUserService
                 .getCurrentUser()
                 .flatMap(userDataService::setViewedCurrentVersionReleaseNotes)
-                .thenReturn(new ResponseDTO<>(HttpStatus.OK.value(), null, null));
+                .thenReturn(new ResponseDTO<>(HttpStatus.OK, null));
     }
 
     @JsonView(Views.Public.class)
     @PostMapping(value = "/photo", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Mono<ResponseDTO<UserData>> uploadProfilePhoto(@RequestPart("file") Mono<Part> fileMono) {
-        return fileMono.flatMap(userDataService::saveProfilePhoto)
-                .map(url -> new ResponseDTO<>(HttpStatus.OK.value(), url, null));
+        return fileMono.flatMap(userDataService::saveProfilePhoto).map(url -> new ResponseDTO<>(HttpStatus.OK, url));
     }
 
     @JsonView(Views.Public.class)
     @DeleteMapping("/photo")
     public Mono<ResponseDTO<Void>> deleteProfilePhoto() {
-        return userDataService.deleteProfilePhoto().thenReturn(new ResponseDTO<>(HttpStatus.OK.value(), null, null));
+        return userDataService.deleteProfilePhoto().thenReturn(new ResponseDTO<>(HttpStatus.OK, null));
     }
 
     @JsonView(Views.Public.class)
@@ -207,9 +178,7 @@ public class UserControllerCE {
     @JsonView(Views.Public.class)
     @GetMapping("/features")
     public Mono<ResponseDTO<Map<String, Boolean>>> getFeatureFlags() {
-        return userDataService
-                .getFeatureFlagsForCurrentUser()
-                .map(map -> new ResponseDTO<>(HttpStatus.OK.value(), map, null));
+        return userDataService.getFeatureFlagsForCurrentUser().map(map -> new ResponseDTO<>(HttpStatus.OK, map));
     }
 
     /**
@@ -223,7 +192,7 @@ public class UserControllerCE {
             @RequestHeader("Origin") String originHeader) {
         resendEmailVerificationDTO.setBaseUrl(originHeader);
         return service.resendEmailVerification(resendEmailVerificationDTO, null)
-                .thenReturn(new ResponseDTO<>(HttpStatus.OK.value(), true, null));
+                .thenReturn(new ResponseDTO<>(HttpStatus.OK, true));
     }
 
     /**

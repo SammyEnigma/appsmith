@@ -31,13 +31,9 @@ public interface ImportServiceCE {
     ArtifactBasedImportService<? extends Artifact, ? extends ArtifactImportDTO, ? extends ArtifactExchangeJson>
             getArtifactBasedImportService(ArtifactType artifactType);
 
-    /**
-     * This method takes a file part and makes a Json entity which implements the ArtifactExchangeJson interface
-     *
-     * @param filePart : filePart from which the contents would be made
-     * @return : Json entity which implements ArtifactExchangeJson
-     */
-    Mono<? extends ArtifactExchangeJson> extractArtifactExchangeJson(Part filePart);
+    Mono<String> readFilePartToString(Part file);
+
+    Mono<? extends ArtifactExchangeJson> extractArtifactExchangeJson(String jsonString);
 
     /**
      * Hydrates an Artifact within the specified workspace by saving the provided JSON file.
@@ -49,6 +45,17 @@ public interface ImportServiceCE {
      */
     Mono<? extends ArtifactImportDTO> extractArtifactExchangeJsonAndSaveArtifact(
             Part filePart, String workspaceId, String artifactId);
+
+    /**
+     * Hydrates an Artifact within the specified workspace by saving the provided JSON file.
+     *
+     * @param jsonContents The JSON representing the Artifact object to be saved.
+     *                     The Artifact implements the Artifact interface.
+     * @param workspaceId  The identifier for the destination workspace.
+     * @param artifactId
+     */
+    Mono<? extends ArtifactImportDTO> extractArtifactExchangeJsonAndSaveArtifact(
+            String jsonContents, String workspaceId, String artifactId);
 
     /**
      * Saves the provided ArtifactExchangeJson within the specified workspace.
@@ -83,11 +90,11 @@ public interface ImportServiceCE {
             List<String> entitiesToImport);
 
     Mono<? extends Artifact> restoreSnapshot(
-            String workspaceId, String artifactId, String branchName, ArtifactExchangeJson artifactExchangeJson);
+            String workspaceId, String branchedArtifactId, ArtifactExchangeJson artifactExchangeJson);
 
     Mono<? extends ArtifactImportDTO> getArtifactImportDTO(
             String workspaceId, String artifactId, Artifact importableArtifact, ArtifactType artifactType);
 
     Mono<List<Datasource>> findDatasourceByArtifactId(
-            String workspaceId, String defaultArtifactId, ArtifactType artifactType);
+            String workspaceId, String baseArtifactId, ArtifactType artifactType);
 }
